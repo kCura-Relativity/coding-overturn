@@ -1,0 +1,164 @@
+<script>
+	<name>Coding Overturn Report</name>
+	<description>The Coding Overturn Report script provides a report on all coding overturns based on a selected field.</description>
+	<category>Case Functionality</category>
+	<version>5</version>
+	<input>
+		<sql id="Field" name="Field" required="true">
+		
+			SELECT 
+				Display = [DisplayName],
+				ID = [ArtifactID]
+			FROM [FIELD] (NOLOCK)
+			WHERE 
+				FieldTypeID IN (3, 5, 8)
+			ORDER BY [DisplayName]
+		</sql>
+	</input>
+	<action returns="table" timeout="1200"><![CDATA[
+
+--Verify Indexes exist on Coding Overturn History table
+IF NOT EXISTS (SELECT indid FROM sysindexes WHERE id = OBJECT_ID('OverturnHistory') AND name = 'I_OverturnHistory_FieldArtifactID')
+	BEGIN
+		CREATE INDEX I_OverturnHistory_FieldArtifactID ON OverturnHistory(FieldArtifactID) 
+	END
+IF NOT EXISTS (SELECT indid FROM sysindexes WHERE id = OBJECT_ID('OverturnHistory') AND name = 'I_OverturnHistory_CodeArtifactID')
+	BEGIN
+		CREATE INDEX I_OverturnHistory_CodeArtifactID ON OverturnHistory(CodeArtifactID) 
+	END
+IF NOT EXISTS (SELECT indid FROM sysindexes WHERE id = OBJECT_ID('OverturnHistory') AND name = 'I_OverturnHistory_Timestamp')
+	BEGIN
+		CREATE INDEX I_OverturnHistory_Timestamp ON OverturnHistory(Timestamp) 
+	END
+
+CREATE TABLE #CodingOverturnResultsStage (DocumentArtifactID INT, GroupArtifactID INT, UserArtifactID INT, ReviewDate DATETIME, CodeArtifactID INT, CodeValue VARCHAR(MAX))
+CREATE TABLE #CodingOverturnResultsTemp (ID int PRIMARY KEY IDENTITY, DocumentArtifactID INT, GroupArtifactID INT, UserArtifactID INT, ReviewDate DATETIME, CodeValue VARCHAR(MAX))
+
+--Determine Field Type
+DECLARE @FieldTypeID INT
+SELECT @FieldTypeID = FieldTypeID FROM [Field] WITH(NOLOCK) WHERE ArtifactID = #Field#
+
+IF @FieldTypeID = 3	
+	BEGIN
+		INSERT INTO #CodingOverturnResultsStage
+		SELECT
+			DocumentArtifactID,
+			GroupArtifactID,
+			UserArtifactID,
+			[Timestamp],
+			CodeArtifactID,
+			FieldValue
+		FROM [OverturnHistory] K WITH(NOLOCK)
+		WHERE 
+			FieldArtifactID = #Field# 
+			AND GroupArtifactID IS NOT NULL 
+		ORDER BY [Timestamp] ASC
+	END
+ELSE 
+	BEGIN
+		INSERT INTO #CodingOverturnResultsStage
+		SELECT
+			DocumentArtifactID,
+			GroupArtifactID,
+			UserArtifactID,
+			[Timestamp],
+			CodeArtifactID,
+			C.[Name]
+		FROM [OverturnHistory] K WITH(NOLOCK)
+			LEFT JOIN [Code] C WITH(NOLOCK) ON K.CodeArtifactID = C.ArtifactID
+		WHERE 
+			FieldArtifactID = #Field# 
+			AND GroupArtifactID IS NOT NULL 
+		ORDER BY [Timestamp] ASC
+	END
+
+CREATE INDEX I_CodingOverturnResultsStage_ALL ON #CodingOverturnResultsStage(DocumentArtifactID, GroupArtifactID, UserArtifactID, ReviewDate) 
+
+--Get Distinct Review Dates
+CREATE TABLE #UniqueReviewDate (ID int PRIMARY KEY IDENTITY, DocumentArtifactID INT, GroupArtifactID INT, UserArtifactID INT, ReviewDate DATETIME)
+
+INSERT INTO #UniqueReviewDate 
+SELECT DISTINCT DocumentArtifactID, GroupArtifactID, UserArtifactID, ReviewDate 
+FROM #CodingOverturnResultsStage WITH(NOLOCK) 
+ORDER BY DocumentArtifactID, ReviewDate ASC
+
+CREATE INDEX #I_UniqueReviewDate_ReviewDate ON #UniqueReviewDate(ReviewDate)
+CREATE INDEX #I_UniqueReviewDate_ID ON #UniqueReviewDate(ID) INCLUDE (DocumentArtifactID, GroupArtifactID, UserArtifactID, ReviewDate)
+
+DECLARE @timeCounter INT
+DECLARE @timeCounterMAX INT
+SELECT @timeCounterMAX = COUNT(*) FROM #UniqueReviewDate WITH(NOLOCK)
+SET @timeCounter = 0
+
+WHILE @timeCounter < @timeCounterMAX
+	BEGIN
+		DECLARE @SQL VARCHAR(MAX), @DocumentArtifactID INT, @GroupArtifactID INT, @UserArtifactID INT, @dateTime DATETIME
+		SELECT @DocumentArtifactID = DocumentArtifactID, @GroupArtifactID = GroupArtifactID, @UserArtifactID = UserArtifactID, @dateTime = ReviewDate FROM #UniqueReviewDate WITH(NOLOCK) WHERE ID = @timeCounter + 1
+		
+		DECLARE @CodeValueList VARCHAR(MAX)
+		SET @CodeValueList = ''
+		SELECT @CodeValueList = COALESCE(@CodeValueList + ', ' ,'' ) + CodeValue
+		FROM #CodingOverturnResultsStage WITH(NOLOCK)
+		WHERE 
+			DocumentArtifactID = @DocumentArtifactID 
+			AND GroupArtifactID = @GroupArtifactID 
+			AND UserArtifactID = @UserArtifactID 
+			AND ReviewDate = @dateTime
+	
+		INSERT INTO #CodingOverturnResultsTemp
+		SELECT @DocumentArtifactID, @GroupArtifactID, @UserArtifactID, @dateTime, RIGHT(@CodeValueList, LEN(@CodeValueList)-2)
+
+		SET @timeCounter = @timeCounter + 1
+	END
+
+--Prepare FInal Results
+CREATE TABLE #CodingOverturnResultsFinal (ID int PRIMARY KEY IDENTITY, DocumentArtifactID INT, GroupArtifactIDPre INT, UserArtifactIDPre INT, ReviewDatePre DATETIME, CodeValuePre VARCHAR(MAX), GroupArtifactIDPost INT, UserArtifactIDPost INT, ReviewDatePost DATETIME, CodeValuePost VARCHAR(MAX))
+
+INSERT INTO #CodingOverturnResultsFinal
+SELECT
+	T2.DocumentArtifactID,
+	T2.GroupArtifactID,
+	T2.UserArtifactID,
+	T2.ReviewDate,
+	T2.CodeValue,
+	T1.GroupArtifactID,
+	T1.UserArtifactID,
+	T1.ReviewDate,
+	T1.CodeValue
+FROM #CodingOverturnResultsTemp T2 WITH(NOLOCK)
+	INNER JOIN #CodingOverturnResultsTemp T1 WITH(NOLOCK) ON T1.ID = T2.ID + 1 
+WHERE
+  T1.DocumentArtifactID = T2.DocumentArtifactID
+
+SELECT
+	A1.TextIdentifier [Document Identifier],
+	G1.[Name] [Reviewer Group],
+	ISNULL(U1.FirstName, '') + ' ' + ISNULL(U1.LastName, '') [Reviewer],
+	CONVERT(VARCHAR(MAX), F.ReviewDatePre, 121) [Review Date],
+	F.CodeValuePre [Reviewer Coding],
+	G2.[Name] [2nd Level Reviewer Group],
+	ISNULL(U2.FirstName, '') + ' ' + ISNULL(U2.LastName, '') [2nd Level Reviewer],
+	CONVERT(VARCHAR(MAX), F.ReviewDatePost, 121) [2nd Level Review Date],
+	F.CodeValuePost [2nd Level Reviewer Coding],
+	BS.[Name] AS [Batch Set],
+	B.[Name] AS [Batch Name]
+FROM #CodingOverturnResultsFinal F WITH(NOLOCK)
+	INNER JOIN [Artifact] A1 WITH(NOLOCK) ON F.DocumentArtifactID = A1.ArtifactID
+	INNER JOIN [Group] G1 WITH(NOLOCK) ON F.GroupArtifactIDPre = G1.ArtifactID
+	INNER JOIN [Group] G2 WITH(NOLOCK) ON F.GroupArtifactIDPost = G2.ArtifactID
+	INNER JOIN #MasterDatabasePrepend#[User] U1 WITH(NOLOCK) ON F.UserArtifactIDPre = U1.ArtifactID
+	INNER JOIN #MasterDatabasePrepend#[User] U2 WITH(NOLOCK) ON F.UserArtifactIDPost = U2.ArtifactID
+	LEFT JOIN [DocumentBatch] DB WITH(NOLOCK) ON DB.[DocumentArtifactID] = F.[DocumentArtifactID]
+	LEFT JOIN [Batch] B WITH(NOLOCK) ON DB.[BatchArtifactID] = B.[ArtifactID]
+	LEFT JOIN [BatchSet] BS WITH(NOLOCK) ON B.[BatchSetArtifactID] = BS.[ArtifactID]
+ORDER BY
+	F.ID
+
+DROP TABLE #CodingOverturnResultsStage
+DROP TABLE #CodingOverturnResultsTemp
+DROP TABLE #UniqueReviewDate
+DROP TABLE #CodingOverturnResultsFinal
+
+
+]]></action>
+</script>

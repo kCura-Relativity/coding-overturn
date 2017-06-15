@@ -1,0 +1,140 @@
+<script>
+	<name>Coding Overturn Setup</name>
+	<description>The Coding Overturn Setup script will create the fields and associated groups that need to be monitored by the solution.</description>
+	<category>Case Functionality</category>
+	<version>5</version>
+	<input>
+		<constant id="AddRemoveView" name="Action:" type="text" required="true">
+			<option>View Selected Fields</option>
+			<option>Add</option>
+			<option>Remove</option>
+		</constant>
+		<sql id="Field" name="Field" required="false">
+			SELECT 
+				Display = [DisplayName],
+				ID = [ArtifactID]
+			FROM
+				[FIELD] WITH(NOLOCK)
+			WHERE 
+				FieldTypeID IN (3, 5, 8)
+			ORDER BY [DisplayName]
+		</sql>
+		<sql id="Group1" name="1st Level Review Group" required="false">
+			SELECT
+				Display = [Name],
+				ID = [ArtifactID]
+			FROM
+				[Group] WITH(NOLOCK)
+			WHERE
+				GroupType = 2
+			ORDER BY
+				[Name]
+		</sql>
+		<sql id="Group2" name="2nd Level Review Group" required="false">
+			SELECT
+				Display = [Name],
+				ID = [ArtifactID]
+			FROM
+				[Group] WITH(NOLOCK)
+			WHERE
+				GroupType = 2
+			ORDER BY
+				[Name]
+		</sql>
+	</input>
+	<action returns="table" timeout="1200"><![CDATA[
+
+	DECLARE @FieldID VARCHAR(100) = ISNULL('#Field#','')
+	DECLARE @Group1ArtifactID VARCHAR(100) = ISNULL('#Group1#','')
+	DECLARE @Group2ArtifactID VARCHAR(100) = ISNULL('#Group2#','')
+
+	--Create Table
+	IF OBJECT_ID('FieldsToMonitor') IS NULL  
+		BEGIN
+			CREATE TABLE FieldsToMonitor (FieldArtifactID INT, Group1ArtifactID INT, Group2ArtifactID INT)
+		END
+
+	IF OBJECT_ID('OverturnHistory') IS NULL 
+		BEGIN
+			CREATE TABLE OverturnHistory (UserArtifactID INT, GroupArtifactID INT, DocumentArtifactID INT, FieldArtifactID INT, FieldTypeID INT, FieldValue VARCHAR(MAX), CodeArtifactID INT, [Timestamp] DateTime)
+			CREATE INDEX I_OverturnHistory_FieldArtifactID ON [OverturnHistory](FieldArtifactID) 
+			CREATE INDEX I_OverturnHistory_CodeArtifactID ON [OverturnHistory](CodeArtifactID) 
+			CREATE INDEX I_OverturnHistory_Timestamp ON [OverturnHistory](Timestamp) 
+		END
+
+	--Action: View Selected Fields
+	IF #AddRemoveView# = 'View Selected Fields'
+		BEGIN
+			GOTO DisplayResults
+		END
+
+	--Action: Add OR Remove
+	IF @FieldID = '[NOT SET]' OR @FieldID = '' OR @Group1ArtifactID = '[NOT SET]' OR @Group1ArtifactID = '' OR @Group2ArtifactID = '[NOT SET]' OR @Group2ArtifactID = ''
+		BEGIN
+			SELECT 'Please make sure to select a Field and both Review Groups when adding or removing fields.' Warning 
+			GOTO TheEnd
+		END
+
+	DECLARE @itemCount INT
+	SET @itemCount = 0
+
+	SELECT @itemCount = Count(FieldArtifactID) 
+	FROM 
+		[FieldsToMonitor] (NOLOCK) 
+	WHERE 
+		FieldArtifactID = CONVERT(INT, @FieldID)
+		AND (Group1ArtifactID  = CONVERT(INT, @Group1ArtifactID) OR Group2ArtifactID = CONVERT(INT, @Group1ArtifactID) OR Group1ArtifactID = CONVERT(INT, @Group2ArtifactID) OR Group2ArtifactID = CONVERT(INT, @Group2ArtifactID))
+
+	IF #AddRemoveView# = 'Add' 
+		BEGIN
+			IF @itemCount > 0
+				BEGIN
+					SELECT 'For each selected Field, a group can only be part of either Review Group once.' Warning 
+					GOTO TheEnd
+				END
+			ELSE
+				BEGIN
+					IF @Group1ArtifactID = @Group2ArtifactID
+						BEGIN
+							SELECT 'Your 1st and 2nd Level Review Groups cannot be the same.  Please select different Review Groups.' Warning 
+							GOTO TheEnd
+						END
+					ELSE
+						BEGIN
+							INSERT FieldsToMonitor
+							SELECT CONVERT(INT, @FieldID), CONVERT(INT, @Group1ArtifactID), CONVERT(INT, @Group2ArtifactID)
+							GOTO DisplayResults
+						END
+				END
+		END
+
+
+	--Action: Remove
+	IF #AddRemoveView# = 'Remove'
+		BEGIN
+			IF @itemCount > 0
+				BEGIN
+					DELETE FROM FieldsToMonitor 
+					WHERE 
+						FieldArtifactID = CONVERT(INT, @FieldID)
+						AND Group1ArtifactID = CONVERT(INT, @Group1ArtifactID)
+						AND Group2ArtifactID = CONVERT(INT, @Group2ArtifactID)
+					GOTO DisplayResults
+				END
+		END
+
+DisplayResults:
+	SELECT 
+		DisplayName [Field],
+		G1.Name [1st Level Reviewer Group], 
+		G2.Name [2nd Level Reviewer Group]
+	FROM 
+		[FieldsToMonitor] K (NOLOCK) 
+		INNER JOIN [FIELD] F (NOLOCK) ON K.FieldArtifactID = F.ArtifactID
+		INNER JOIN [Group] G1 (NOLOCK) ON K.Group1ArtifactID = G1.ArtifactID
+		INNER JOIN [Group] G2 (NOLOCK) ON K.Group2ArtifactID = G2.ArtifactID
+
+TheEnd:
+
+	]]></action>
+</script>
